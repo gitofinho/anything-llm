@@ -386,6 +386,31 @@ const KEY_MAPPING = {
     envKey: "QDRANT_API_KEY",
     checks: [],
   },
+  QdrantHybridEnabled: {
+    envKey: "QDRANT_HYBRID_ENABLED",
+    checks: [isValidBoolStringOrNull],
+  },
+  KiwiServiceURL: {
+    envKey: "KIWI_SERVICE_URL",
+    checks: [isValidURL],
+  },
+  QdrantHybridFusion: {
+    envKey: "QDRANT_HYBRID_FUSION",
+    checks: [
+      (input) =>
+        ["rrf", null, undefined, ""].includes(input)
+          ? null
+          : "Only 'rrf' is supported in this release.",
+    ],
+  },
+  QdrantHybridBM25K1: {
+    envKey: "QDRANT_HYBRID_BM25_K1",
+    checks: [isNumericStringOrNull],
+  },
+  QdrantHybridBM25B: {
+    envKey: "QDRANT_HYBRID_BM25_B",
+    checks: [isNumericStringOrNull],
+  },
   PineConeKey: {
     envKey: "PINECONE_API_KEY",
     checks: [],
@@ -882,6 +907,18 @@ function isValidURL(input = "") {
   } catch {
     return "URL is not a valid URL.";
   }
+}
+
+function isValidBoolStringOrNull(input) {
+  if (input === null || input === undefined || input === "") return null;
+  return ["true", "false"].includes(String(input).toLowerCase())
+    ? null
+    : "Must be 'true' or 'false'.";
+}
+
+function isNumericStringOrNull(input) {
+  if (input === null || input === undefined || input === "") return null;
+  return Number.isFinite(Number(input)) ? null : "Must be a numeric value.";
 }
 
 function validOpenAIKey(input = "") {
