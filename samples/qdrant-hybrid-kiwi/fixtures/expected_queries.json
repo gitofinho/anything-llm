@@ -1,0 +1,29 @@
+{
+  "_meta": {
+    "description": "Korean queries against the 2026 HF recruitment PDF. Each entry lists expected keyword stems that should appear in the retrieved top-K chunks. Used to compare hybrid vs dense-only retrieval.",
+    "topK": 5,
+    "source": "raw/2026_hf_recruitment.pdf"
+  },
+  "queries": [
+    {
+      "query": "전형직 채용 인원은 몇 명인가요?",
+      "expected_keywords": ["전형직", "채용", "인원"]
+    },
+    {
+      "query": "지원 자격 요건을 알려주세요",
+      "expected_keywords": ["지원", "자격", "요건"]
+    },
+    {
+      "query": "필기시험 과목은 무엇인가요?",
+      "expected_keywords": ["필기", "시험", "과목"]
+    },
+    {
+      "query": "면접 전형 절차가 어떻게 되나요?",
+      "expected_keywords": ["면접", "전형", "절차"]
+    },
+    {
+      "query": "우대 사항은 무엇이 있나요?",
+      "expected_keywords": ["우대", "사항"]
+    }
+  ]
+}

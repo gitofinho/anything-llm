@@ -10,3 +10,6 @@ aws_cf_deploy_anything_llm.json
 yarn.lock
 *.bak
 .idea
+
+# Sample data: binary fixtures kept local-only (see samples/*/README.md).
+samples/**/raw/
