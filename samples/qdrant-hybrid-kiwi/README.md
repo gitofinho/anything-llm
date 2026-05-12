@@ -27,3 +27,17 @@ The integration test (added under `feat/qdrant-hybrid-sample-e2e`) ingests
 this PDF through the collector into a fresh Qdrant workspace, then runs each
 query in `fixtures/expected_queries.json` and asserts that the expected
 keywords appear in the top-K results with hit-rate ≥ dense-only baseline.
+
+## Running the integration test
+
+```bash
+./scripts/integration/start-hybrid-stack.sh up
+RUN_E2E=1 \
+  QDRANT_ENDPOINT=http://localhost:6333 \
+  KIWI_SERVICE_URL=http://localhost:8765 \
+  QDRANT_HYBRID_ENABLED=true \
+  cd server && yarn test:integration
+./scripts/integration/start-hybrid-stack.sh down
+```
+
+The test skips automatically when `RUN_E2E` is unset or when the sample PDF is missing.
