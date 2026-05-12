@@ -81,38 +81,91 @@ class QDrant extends VectorDatabase {
     client,
     namespace,
     queryVector,
+    queryText = "",
     similarityThreshold = 0.25,
     topN = 4,
     filterIdentifiers = [],
   }) {
-    const result = {
-      contextTexts: [],
-      sourceDocuments: [],
-      scores: [],
-    };
+    const result = { contextTexts: [], sourceDocuments: [], scores: [] };
 
-    const responses = await client.search(namespace, {
-      vector: queryVector,
+    const schema = await QDrant.vectorSchema(client, namespace);
+    const isHybridColl = schema === "hybrid";
+
+    if (!isHybridColl) {
+      const responses = await client.search(namespace, {
+        vector: queryVector,
+        limit: topN,
+        with_payload: true,
+      });
+
+      responses.forEach((response) => {
+        if (response.score < similarityThreshold) return;
+        if (filterIdentifiers.includes(sourceIdentifier(response?.payload))) {
+          this.logger(
+            "QDrant: A source was filtered from context as it's parent document is pinned."
+          );
+          return;
+        }
+
+        result.contextTexts.push(response?.payload?.text || "");
+        result.sourceDocuments.push({
+          ...(response?.payload || {}),
+          id: response.id,
+          score: response.score,
+        });
+        result.scores.push(response.score);
+      });
+
+      return result;
+    }
+
+    // Hybrid collection path — use Query API with RRF fusion.
+    const cfg = hybridConfig();
+    const kiwi = _kiwiClient();
+    const kiwiHealthy = await kiwi.isHealthy();
+
+    const prefetchLimit = Math.max(topN * 10, 50);
+    const prefetch = [
+      { using: "dense", query: queryVector, limit: prefetchLimit },
+    ];
+
+    if (kiwiHealthy && queryText && queryText.trim()) {
+      const { readStats } = require("./hybrid/stats");
+      const { buildQuerySparse } = require("./hybrid/bm25");
+      const tokens = (await kiwi.tokenize([queryText], cfg.filterPos))[0] || [];
+      if (tokens.length > 0) {
+        const stats = await readStats(client, namespace);
+        const sparseQuery = buildQuerySparse(tokens, stats);
+        if (sparseQuery.indices.length > 0) {
+          prefetch.push({
+            using: "sparse",
+            query: sparseQuery,
+            limit: prefetchLimit,
+          });
+        }
+      }
+    } else if (!kiwiHealthy) {
+      this.logger(
+        "similarityResponse",
+        `kiwi-service unhealthy; using dense-only prefetch on hybrid collection '${namespace}'.`
+      );
+    }
+
+    const response = await client.query(namespace, {
+      prefetch,
+      query: { fusion: cfg.fusion },
       limit: topN,
       with_payload: true,
     });
+    const hits = response?.points || [];
 
-    responses.forEach((response) => {
-      if (response.score < similarityThreshold) return;
-      if (filterIdentifiers.includes(sourceIdentifier(response?.payload))) {
-        this.logger(
-          "QDrant: A source was filtered from context as it's parent document is pinned."
-        );
-        return;
-      }
-
-      result.contextTexts.push(response?.payload?.text || "");
-      result.sourceDocuments.push({
-        ...(response?.payload || {}),
-        id: response.id,
-        score: response.score,
-      });
-      result.scores.push(response.score);
+    hits.forEach((hit) => {
+      if (typeof hit.score === "number" && hit.score < similarityThreshold) return;
+      if (filterIdentifiers.includes(sourceIdentifier(hit?.payload))) return;
+      if (!hit?.payload?.text) return;
+      result.contextTexts.push(hit.payload.text);
+      result.sourceDocuments.push({ ...hit.payload, score: hit.score });
+      result.scores.push(hit.score);
     });
 
     return result;
@@ -504,6 +557,7 @@ class QDrant extends VectorDatabase {
       client,
       namespace,
       queryVector,
+      queryText: input,
       similarityThreshold,
       topN,
       filterIdentifiers,
