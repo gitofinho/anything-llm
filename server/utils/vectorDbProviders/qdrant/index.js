@@ -6,6 +6,15 @@ const { v4: uuidv4 } = require("uuid");
 const { toChunks, getEmbeddingEngineSelection } = require("../../helpers");
 const { sourceIdentifier } = require("../../chats");
 const { VectorDatabase } = require("../base");
+const { KiwiClient, hybridConfig } = require("./hybrid");
+
+let _kiwi = null;
+function _kiwiClient() {
+  if (_kiwi) return _kiwi;
+  const cfg = hybridConfig();
+  _kiwi = new KiwiClient({ baseUrl: cfg.kiwiServiceUrl });
+  return _kiwi;
+}
 
 class QDrant extends VectorDatabase {
   constructor() {
@@ -136,19 +145,40 @@ class QDrant extends VectorDatabase {
   // we pass this in from the first chunk to infer the dimensions like other
   // providers do.
   async getOrCreateCollection(client, namespace, dimensions = null) {
-    if (await this.namespaceExists(client, namespace)) {
-      return await client.getCollection(namespace);
+    return QDrant.getOrCreateCollection(client, namespace, dimensions, this);
+  }
+
+  static async getOrCreateCollection(client, namespace, dimensions = null, _instance = null) {
+    const existingCollection = await client.getCollection(namespace).catch(() => null);
+    if (existingCollection) {
+      return existingCollection;
     }
     if (!dimensions)
       throw new Error(
-        `Qdrant:getOrCreateCollection Unable to infer vector dimension from input. Open an issue on GitHub for support.`
+        `Qdrant:getOrCreateCollection Unable to infer vector dimension from input.`
       );
-    await client.createCollection(namespace, {
-      vectors: {
-        size: dimensions,
-        distance: "Cosine",
-      },
-    });
+
+    const cfg = hybridConfig();
+    const wantHybrid = cfg.enabled && (await _kiwiClient().isHealthy());
+
+    if (wantHybrid) {
+      await client.createCollection(namespace, {
+        vectors: { dense: { size: dimensions, distance: "Cosine" } },
+        sparse_vectors: { sparse: {} },
+      });
+    } else {
+      if (cfg.enabled) {
+        if (_instance) {
+          _instance.logger(
+            "getOrCreateCollection",
+            `kiwi-service unhealthy; creating legacy dense-only collection '${namespace}'.`
+          );
+        }
+      }
+      await client.createCollection(namespace, {
+        vectors: { size: dimensions, distance: "Cosine" },
+      });
+    }
     return await client.getCollection(namespace);
   }
 
@@ -436,6 +466,18 @@ class QDrant extends VectorDatabase {
     }
 
     return documents;
+  }
+
+  static async vectorSchema(client, namespace) {
+    const coll = await client.getCollection(namespace).catch(() => null);
+    if (!coll) return null;
+    const v = coll?.config?.params?.vectors;
+    if (v && typeof v === "object" && v.dense && !("size" in v)) return "hybrid";
+    return "dense";
+  }
+
+  static __setKiwiClientForTest(stub) {
+    _kiwi = stub;
   }
 }
 
