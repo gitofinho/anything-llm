@@ -12,6 +12,8 @@ const {
   convertToChatHistory,
   writeResponseChunk,
 } = require("../../utils/helpers/chat/responses");
+const prisma = require("../../utils/prisma");
+const { fileData } = require("../../utils/files");
 
 function embeddedEndpoints(app) {
   if (!app) return;
@@ -62,6 +64,66 @@ function embeddedEndpoints(app) {
           error: e.message,
         });
         response.end();
+      }
+    }
+  );
+
+  // Embed-scoped document preview. Returns parsed text (not the original binary, which the
+  // collector deletes after parsing). The widget uses this for citation chips on uploaded files.
+  // Must be registered BEFORE the generic /:sessionId GET so Express matches "document" first.
+  app.get(
+    "/embed/:embedId/document/:docId",
+    [validEmbedConfig],
+    async (request, response) => {
+      try {
+        const embed = response.locals.embedConfig;
+        const { docId } = request.params;
+        const doc = await prisma.workspace_documents.findFirst({
+          where: { docId, workspaceId: embed.workspace?.id },
+          select: { docpath: true, filename: true, metadata: true },
+        });
+        if (!doc) {
+          response.status(404).type("text/plain").send("Document not found");
+          return;
+        }
+        const parsed = await fileData(doc.docpath);
+        if (!parsed) {
+          response.status(404).type("text/plain").send("File missing");
+          return;
+        }
+        const meta = (() => {
+          try {
+            return JSON.parse(doc.metadata || "{}");
+          } catch {
+            return {};
+          }
+        })();
+        const title = meta.title || doc.filename || "Document";
+        const escape = (s) =>
+          String(s ?? "").replace(
+            /[&<>"']/g,
+            (c) =>
+              ({
+                "&": "&amp;",
+                "<": "&lt;",
+                ">": "&gt;",
+                '"': "&quot;",
+                "'": "&#39;",
+              })[c]
+          );
+        response.set("Cache-Control", "no-store");
+        response.type("text/html").send(`<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>${escape(title)}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:820px;margin:24px auto;padding:0 16px;line-height:1.6}h1{font-size:18px;border-bottom:1px solid #eee;padding-bottom:8px}.meta{color:#666;font-size:12px;margin-bottom:16px}pre{white-space:pre-wrap;word-wrap:break-word;background:#fafafa;padding:16px;border-radius:8px;font-family:inherit}</style>
+</head><body>
+<h1>${escape(title)}</h1>
+<div class="meta">${escape(meta.docSource || "")}${meta.published ? " · " + escape(meta.published) : ""}</div>
+<pre>${escape(parsed.pageContent || "")}</pre>
+</body></html>`);
+      } catch (e) {
+        console.error("[embed/document]", e);
+        response.status(500).type("text/plain").send("error");
       }
     }
   );
