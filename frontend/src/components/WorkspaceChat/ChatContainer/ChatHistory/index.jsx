@@ -24,6 +24,10 @@ import useTextSize from "@/hooks/useTextSize";
 import useChatHistoryScrollHandle from "@/hooks/useChatHistoryScrollHandle";
 import { ThoughtExpansionProvider } from "./ThoughtContainer";
 import { MessageActionsProvider } from "./MessageActionsContext";
+import {
+  CHAT_HISTORY_SCROLL_CLASS,
+  useChatHistoryBottomPadding,
+} from "../chatScrollLayout";
 
 export default forwardRef(function (
   {
@@ -45,12 +49,17 @@ export default forwardRef(function (
   const isStreaming = history[history.length - 1]?.animate;
   const { showScrollbar } = Appearance.getSettings();
   const { textSizeClass } = useTextSize();
+  const pinnedToBottom = !isUserScrolling && (isAtBottom || isStreaming);
+  const chatHistoryBottomPadding = useChatHistoryBottomPadding({
+    scrollRef: chatHistoryRef,
+    pinned: pinnedToBottom,
+  });
 
   useEffect(() => {
-    if (!isUserScrolling && (isAtBottom || isStreaming)) {
+    if (pinnedToBottom) {
       scrollToBottom(false); // Use instant scroll for auto-scrolling
     }
-  }, [history, isAtBottom, isStreaming, isUserScrolling]);
+  }, [history, pinnedToBottom]);
 
   const handleScroll = (e) => {
     const { scrollTop, scrollHeight, clientHeight } = e.target;
@@ -213,7 +222,12 @@ export default forwardRef(function (
     <MessageActionsProvider>
       <ThoughtExpansionProvider>
         <div
-          className={`markdown text-white/80 light:text-theme-text-primary font-light ${textSizeClass} h-full md:h-[83%] pb-[100px] pt-6 md:pt-0 md:pb-20 md:mx-0 overflow-y-scroll flex flex-col items-center justify-start ${showScrollbar ? "show-scrollbar" : "no-scroll"}`}
+          className={`markdown text-white/80 light:text-theme-text-primary font-light ${textSizeClass} ${CHAT_HISTORY_SCROLL_CLASS} flex flex-col items-center justify-start ${showScrollbar ? "show-scrollbar" : "no-scroll"}`}
+          style={
+            chatHistoryBottomPadding
+              ? { paddingBottom: chatHistoryBottomPadding }
+              : undefined
+          }
           id="chat-history"
           ref={chatHistoryRef}
           onScroll={handleScroll}

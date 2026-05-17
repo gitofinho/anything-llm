@@ -25,3 +25,9 @@ dist-ssr
 bundleinspector.html
 .env.production
 flow-typed
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/.playwright-mcp/

@@ -22,3 +22,6 @@ server/__tests__/utils/agents/models/context-windows/
 
 # Local scratch page for manually exercising the embed widget.
 /test.html
+
+# Playwright MCP browser session artifacts (per-machine, not shared).
+.playwright-mcp/
