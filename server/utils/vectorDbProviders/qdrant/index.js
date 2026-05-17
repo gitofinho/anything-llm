@@ -6,6 +6,23 @@ const { v4: uuidv4 } = require("uuid");
 const { toChunks, getEmbeddingEngineSelection } = require("../../helpers");
 const { sourceIdentifier } = require("../../chats");
 const { VectorDatabase } = require("../base");
+const {
+  KiwiClient,
+  hybridConfig,
+  hashToken,
+  buildDocSparse,
+  applyDocsDelta,
+} = require("./hybrid");
+
+let _kiwi = null;
+function _kiwiClient() {
+  if (_kiwi) return _kiwi;
+  const cfg = hybridConfig();
+  _kiwi = new KiwiClient({ baseUrl: cfg.kiwiServiceUrl });
+  return _kiwi;
+}
+
+let _injectedClient = null;
 
 class QDrant extends VectorDatabase {
   constructor() {
@@ -17,6 +34,7 @@ class QDrant extends VectorDatabase {
   }
 
   async connect() {
+    if (_injectedClient) return { client: _injectedClient };
     if (process.env.VECTOR_DB !== "qdrant")
       throw new Error("QDrant::Invalid ENV settings");
 
@@ -63,38 +81,91 @@ class QDrant extends VectorDatabase {
     client,
     namespace,
     queryVector,
+    queryText = "",
     similarityThreshold = 0.25,
     topN = 4,
     filterIdentifiers = [],
   }) {
-    const result = {
-      contextTexts: [],
-      sourceDocuments: [],
-      scores: [],
-    };
+    const result = { contextTexts: [], sourceDocuments: [], scores: [] };
 
-    const responses = await client.search(namespace, {
-      vector: queryVector,
+    const schema = await QDrant.vectorSchema(client, namespace);
+    const isHybridColl = schema === "hybrid";
+
+    if (!isHybridColl) {
+      const responses = await client.search(namespace, {
+        vector: queryVector,
+        limit: topN,
+        with_payload: true,
+      });
+
+      responses.forEach((response) => {
+        if (response.score < similarityThreshold) return;
+        if (filterIdentifiers.includes(sourceIdentifier(response?.payload))) {
+          this.logger(
+            "QDrant: A source was filtered from context as it's parent document is pinned."
+          );
+          return;
+        }
+
+        result.contextTexts.push(response?.payload?.text || "");
+        result.sourceDocuments.push({
+          ...(response?.payload || {}),
+          id: response.id,
+          score: response.score,
+        });
+        result.scores.push(response.score);
+      });
+
+      return result;
+    }
+
+    // Hybrid collection path — use Query API with RRF fusion.
+    const cfg = hybridConfig();
+    const kiwi = _kiwiClient();
+    const kiwiHealthy = await kiwi.isHealthy();
+
+    const prefetchLimit = Math.max(topN * 10, 50);
+    const prefetch = [
+      { using: "dense", query: queryVector, limit: prefetchLimit },
+    ];
+
+    if (kiwiHealthy && queryText && queryText.trim()) {
+      const { readStats } = require("./hybrid/stats");
+      const { buildQuerySparse } = require("./hybrid/bm25");
+      const tokens = (await kiwi.tokenize([queryText], cfg.filterPos))[0] || [];
+      if (tokens.length > 0) {
+        const stats = await readStats(client, namespace);
+        const sparseQuery = buildQuerySparse(tokens, stats);
+        if (sparseQuery.indices.length > 0) {
+          prefetch.push({
+            using: "sparse",
+            query: sparseQuery,
+            limit: prefetchLimit,
+          });
+        }
+      }
+    } else if (!kiwiHealthy) {
+      this.logger(
+        "similarityResponse",
+        `kiwi-service unhealthy; using dense-only prefetch on hybrid collection '${namespace}'.`
+      );
+    }
+
+    const response = await client.query(namespace, {
+      prefetch,
+      query: { fusion: cfg.fusion },
       limit: topN,
       with_payload: true,
     });
+    const hits = response?.points || [];
 
-    responses.forEach((response) => {
-      if (response.score < similarityThreshold) return;
-      if (filterIdentifiers.includes(sourceIdentifier(response?.payload))) {
-        this.logger(
-          "QDrant: A source was filtered from context as it's parent document is pinned."
-        );
-        return;
-      }
-
-      result.contextTexts.push(response?.payload?.text || "");
-      result.sourceDocuments.push({
-        ...(response?.payload || {}),
-        id: response.id,
-        score: response.score,
-      });
-      result.scores.push(response.score);
+    hits.forEach((hit) => {
+      if (typeof hit.score === "number" && hit.score < similarityThreshold) return;
+      if (filterIdentifiers.includes(sourceIdentifier(hit?.payload))) return;
+      if (!hit?.payload?.text) return;
+      result.contextTexts.push(hit.payload.text);
+      result.sourceDocuments.push({ ...hit.payload, score: hit.score });
+      result.scores.push(hit.score);
     });
 
     return result;
@@ -136,20 +207,67 @@ class QDrant extends VectorDatabase {
   // we pass this in from the first chunk to infer the dimensions like other
   // providers do.
   async getOrCreateCollection(client, namespace, dimensions = null) {
-    if (await this.namespaceExists(client, namespace)) {
-      return await client.getCollection(namespace);
+    return QDrant.getOrCreateCollection(client, namespace, dimensions, this);
+  }
+
+  static async getOrCreateCollection(client, namespace, dimensions = null, _instance = null) {
+    const existingCollection = await client.getCollection(namespace).catch(() => null);
+    if (existingCollection) {
+      return existingCollection;
     }
     if (!dimensions)
       throw new Error(
-        `Qdrant:getOrCreateCollection Unable to infer vector dimension from input. Open an issue on GitHub for support.`
+        `Qdrant:getOrCreateCollection Unable to infer vector dimension from input.`
       );
-    await client.createCollection(namespace, {
-      vectors: {
-        size: dimensions,
-        distance: "Cosine",
-      },
-    });
+
+    const cfg = hybridConfig();
+    const wantHybrid = cfg.enabled && (await _kiwiClient().isHealthy());
+
+    if (wantHybrid) {
+      await client.createCollection(namespace, {
+        vectors: { dense: { size: dimensions, distance: "Cosine" } },
+        sparse_vectors: { sparse: {} },
+      });
+    } else {
+      if (cfg.enabled) {
+        if (_instance) {
+          _instance.logger(
+            "getOrCreateCollection",
+            `kiwi-service unhealthy; creating legacy dense-only collection '${namespace}'.`
+          );
+        }
+      }
+      await client.createCollection(namespace, {
+        vectors: { size: dimensions, distance: "Cosine" },
+      });
+    }
     return await client.getCollection(namespace);
+  }
+
+  async _buildHybridPoints(items) {
+    const cfg = hybridConfig();
+    const texts = items.map((it) => it.text || "");
+    const tokenLists = await _kiwiClient().tokenize(texts, cfg.filterPos);
+
+    const points = [];
+    const docs = [];
+    items.forEach((it, i) => {
+      const tokens = tokenLists[i] || [];
+      const hashes = tokens.map(hashToken);
+      const sparse = buildDocSparse(tokens, {
+        avgdl: Math.max(tokens.length, 1),
+        k1: cfg.bm25.k1,
+        b: cfg.bm25.b,
+      });
+      points.push({
+        id: it.id,
+        vector: { dense: it.denseVector, sparse },
+        payload: it.payload,
+      });
+      docs.push({ tokens, hashes });
+    });
+
+    return { points, docs };
   }
 
   async addDocumentToNamespace(
@@ -186,37 +304,77 @@ class QDrant extends VectorDatabase {
               namespace,
             });
 
-          for (const chunk of chunks) {
-            const submission = {
-              ids: [],
-              vectors: [],
-              payloads: [],
-            };
+          const schema = await QDrant.vectorSchema(client, namespace);
+          if (schema === "hybrid") {
+            for (const chunk of chunks) {
+              const items = [];
 
-            // Before sending to Qdrant and saving the records to our db
-            // we need to assign the id of each chunk that is stored in the cached file.
-            // The id property must be defined or else it will be unable to be managed by ALLM.
-            chunk.forEach((chunk) => {
-              const id = uuidv4();
-              if (chunk?.payload?.hasOwnProperty("id")) {
-                const { id: _id, ...payload } = chunk.payload;
-                documentVectors.push({ docId, vectorId: id });
-                submission.ids.push(id);
-                submission.vectors.push(chunk.vector);
-                submission.payloads.push(payload);
-              } else {
-                console.error(
-                  "The 'id' property is not defined in chunk.payload - it will be omitted from being inserted in QDrant collection."
-                );
-              }
-            });
+              // Before sending to Qdrant and saving the records to our db
+              // we need to assign the id of each chunk that is stored in the cached file.
+              // The id property must be defined or else it will be unable to be managed by ALLM.
+              chunk.forEach((c) => {
+                const id = uuidv4();
+                if (c?.payload?.hasOwnProperty("id")) {
+                  const { id: _id, ...payload } = c.payload;
+                  documentVectors.push({ docId, vectorId: id });
+                  items.push({
+                    id,
+                    denseVector: c.vector,
+                    payload,
+                    text: payload?.text || "",
+                  });
+                } else {
+                  console.error(
+                    "The 'id' property is not defined in chunk.payload - it will be omitted from being inserted in QDrant collection."
+                  );
+                }
+              });
 
-            const additionResult = await client.upsert(namespace, {
-              wait: true,
-              batch: { ...submission },
-            });
-            if (additionResult?.status !== "completed")
-              throw new Error("Error embedding into QDrant", additionResult);
+              if (!items.length) continue;
+              const { points, docs } = await this._buildHybridPoints(items);
+              const additionResult = await client.upsert(namespace, {
+                wait: true,
+                points,
+              });
+              if (additionResult?.status !== "completed")
+                throw new Error("Error embedding into QDrant", additionResult);
+              await applyDocsDelta(client, namespace, docs, {
+                denseDim: vectorDimension,
+              });
+            }
+          } else {
+            for (const chunk of chunks) {
+              const submission = {
+                ids: [],
+                vectors: [],
+                payloads: [],
+              };
+
+              // Before sending to Qdrant and saving the records to our db
+              // we need to assign the id of each chunk that is stored in the cached file.
+              // The id property must be defined or else it will be unable to be managed by ALLM.
+              chunk.forEach((chunk) => {
+                const id = uuidv4();
+                if (chunk?.payload?.hasOwnProperty("id")) {
+                  const { id: _id, ...payload } = chunk.payload;
+                  documentVectors.push({ docId, vectorId: id });
+                  submission.ids.push(id);
+                  submission.vectors.push(chunk.vector);
+                  submission.payloads.push(payload);
+                } else {
+                  console.error(
+                    "The 'id' property is not defined in chunk.payload - it will be omitted from being inserted in QDrant collection."
+                  );
+                }
+              });
+
+              const additionResult = await client.upsert(namespace, {
+                wait: true,
+                batch: { ...submission },
+              });
+              if (additionResult?.status !== "completed")
+                throw new Error("Error embedding into QDrant", additionResult);
+            }
           }
 
           await DocumentVectors.bulkInsert(documentVectors);
@@ -293,29 +451,55 @@ class QDrant extends VectorDatabase {
 
       if (vectors.length > 0) {
         const chunks = [];
+        const schema = await QDrant.vectorSchema(client, namespace);
 
-        this.logger("Inserting vectorized chunks into QDrant collection.");
-        for (const chunk of toChunks(vectors, 500)) {
-          const batchIds = [],
-            batchVectors = [],
-            batchPayloads = [];
-          chunks.push(chunk);
-          chunk.forEach((v) => {
-            batchIds.push(v.id);
-            batchVectors.push(v.vector);
-            batchPayloads.push(v.payload);
-          });
+        if (schema === "hybrid") {
+          this.logger(
+            "Inserting hybrid (dense + sparse) chunks into QDrant collection."
+          );
+          for (const chunk of toChunks(vectors, 500)) {
+            chunks.push(chunk);
+            const items = chunk.map((v) => ({
+              id: v.id,
+              denseVector: v.vector,
+              payload: v.payload,
+              text: v.payload?.text || "",
+            }));
+            const { points, docs } = await this._buildHybridPoints(items);
+            const additionResult = await client.upsert(namespace, {
+              wait: true,
+              points,
+            });
+            if (additionResult?.status !== "completed")
+              throw new Error("Error embedding into QDrant", additionResult);
+            await applyDocsDelta(client, namespace, docs, {
+              denseDim: vectorDimension,
+            });
+          }
+        } else {
+          this.logger("Inserting vectorized chunks into QDrant collection.");
+          for (const chunk of toChunks(vectors, 500)) {
+            const batchIds = [],
+              batchVectors = [],
+              batchPayloads = [];
+            chunks.push(chunk);
+            chunk.forEach((v) => {
+              batchIds.push(v.id);
+              batchVectors.push(v.vector);
+              batchPayloads.push(v.payload);
+            });
 
-          const additionResult = await client.upsert(namespace, {
-            wait: true,
-            batch: {
-              ids: batchIds,
-              vectors: batchVectors,
-              payloads: batchPayloads,
-            },
-          });
-          if (additionResult?.status !== "completed")
-            throw new Error("Error embedding into QDrant", additionResult);
+            const additionResult = await client.upsert(namespace, {
+              wait: true,
+              batch: {
+                ids: batchIds,
+                vectors: batchVectors,
+                payloads: batchPayloads,
+              },
+            });
+            if (additionResult?.status !== "completed")
+              throw new Error("Error embedding into QDrant", additionResult);
+          }
         }
 
         await storeVectorResult(chunks, fullFilePath);
@@ -373,6 +557,7 @@ class QDrant extends VectorDatabase {
       client,
       namespace,
       queryVector,
+      queryText: input,
       similarityThreshold,
       topN,
       filterIdentifiers,
@@ -436,6 +621,22 @@ class QDrant extends VectorDatabase {
     }
 
     return documents;
+  }
+
+  static async vectorSchema(client, namespace) {
+    const coll = await client.getCollection(namespace).catch(() => null);
+    if (!coll) return null;
+    const v = coll?.config?.params?.vectors;
+    if (v && typeof v === "object" && v.dense && !("size" in v)) return "hybrid";
+    return "dense";
+  }
+
+  static __setKiwiClientForTest(stub) {
+    _kiwi = stub;
+  }
+
+  static __setQdrantClientForTest(stub) {
+    _injectedClient = stub;
   }
 }
 
