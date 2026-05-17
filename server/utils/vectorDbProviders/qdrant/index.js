@@ -164,7 +164,11 @@ class QDrant extends VectorDatabase {
       if (filterIdentifiers.includes(sourceIdentifier(hit?.payload))) return;
       if (!hit?.payload?.text) return;
       result.contextTexts.push(hit.payload.text);
-      result.sourceDocuments.push({ ...hit.payload, score: hit.score });
+      result.sourceDocuments.push({
+        ...hit.payload,
+        id: hit.id,
+        score: hit.score,
+      });
       result.scores.push(hit.score);
     });
 

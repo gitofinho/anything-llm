@@ -71,6 +71,36 @@ describe("QDrant.similarityResponse — hybrid path", () => {
     expect(client.search).not.toHaveBeenCalled();
   });
 
+  it("propagates the qdrant point id onto each sourceDocument (matches dense-path contract for docId resolution)", async () => {
+    const client = {
+      getCollection: jest.fn(async () => ({
+        config: {
+          params: {
+            vectors: { dense: { size: 4, distance: "Cosine" } },
+            sparse_vectors: { sparse: {} },
+          },
+        },
+      })),
+      retrieve: jest.fn(async () => [
+        { payload: { N: 2, totalLen: 4, df: {} } },
+      ]),
+      query: jest.fn(async () => ({ points: fakeHits(3) })),
+      search: jest.fn(),
+    };
+
+    const res = await db.similarityResponse({
+      client,
+      namespace: "ns",
+      queryVector: [0.1, 0.2, 0.3, 0.4],
+      queryText: "주택 금융 채용",
+      topN: 3,
+    });
+
+    // The embed citation chain resolves source.id -> document_vectors.vectorId -> docId.
+    // The dense path sets `id: response.id`; the hybrid path must do the same.
+    expect(res.sourceDocuments.map((s) => s.id)).toEqual(["c-0", "c-1", "c-2"]);
+  });
+
   it("falls back to dense-only client.search on legacy collections", async () => {
     const client = {
       getCollection: jest.fn(async () => ({
