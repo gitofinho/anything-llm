@@ -7,6 +7,53 @@ const {
   writeResponseChunk,
 } = require("../helpers/chat/responses");
 const { DocumentManager } = require("../DocumentManager");
+const prisma = require("../prisma");
+
+/**
+ * Look up each source's chunk vectorId → docId, restrict to docs that belong to the workspace.
+ * Returns sources with safe fields only ({ id, title, docId?, chunkSource, published }).
+ * Strips file:// urls, raw text, and distance/score to avoid leaking server paths and bloating payloads.
+ */
+async function sanitizeSourcesForEmbed(sources = [], workspaceId = null) {
+  if (!Array.isArray(sources) || sources.length === 0) return [];
+  const vectorIds = sources.map((s) => s?.id).filter(Boolean);
+  let vectorIdToDocId = new Map();
+  if (vectorIds.length && workspaceId) {
+    try {
+      const links = await prisma.document_vectors.findMany({
+        where: { vectorId: { in: vectorIds } },
+        select: { vectorId: true, docId: true },
+      });
+      const docIds = [...new Set(links.map((l) => l.docId))];
+      const validDocs = await prisma.workspace_documents.findMany({
+        where: { docId: { in: docIds }, workspaceId },
+        select: { docId: true },
+      });
+      const validSet = new Set(validDocs.map((d) => d.docId));
+      for (const l of links) {
+        if (validSet.has(l.docId)) vectorIdToDocId.set(l.vectorId, l.docId);
+      }
+    } catch (e) {
+      console.error("[sanitizeSourcesForEmbed] lookup failed:", e?.message);
+    }
+  }
+
+  return sources.map((s) => {
+    const safe = {
+      id: s?.id,
+      title: s?.title || "",
+      chunkSource:
+        typeof s?.chunkSource === "string" &&
+        !s.chunkSource.startsWith("file://")
+          ? s.chunkSource
+          : "",
+      published: s?.published || null,
+    };
+    const docId = vectorIdToDocId.get(s?.id);
+    if (docId) safe.docId = docId;
+    return safe;
+  });
+}
 
 async function streamChatWithForEmbed(
   response,
@@ -135,6 +182,13 @@ async function streamChatWithForEmbed(
   contextTexts = [...contextTexts, ...filledSources.contextTexts];
   sources = [...sources, ...vectorSearchResults.sources];
 
+  // Strip server-only fields (file:// urls, raw text) and resolve docId per source so the
+  // embed widget can build a citation chip linking back through the embed-scoped doc endpoint.
+  const safeSources = await sanitizeSourcesForEmbed(
+    sources,
+    embed.workspace?.id
+  );
+
   // If in query mode and no sources are found in current search or backfilled from history, do not
   // let the LLM try to hallucinate a response or use general knowledge
   if (chatMode === "query" && contextTexts.length === 0) {
@@ -177,7 +231,7 @@ async function streamChatWithForEmbed(
     metrics = performanceMetrics;
     writeResponseChunk(response, {
       uuid,
-      sources: [],
+      sources: safeSources,
       type: "textResponseChunk",
       textResponse: completeText,
       close: true,
@@ -189,7 +243,7 @@ async function streamChatWithForEmbed(
     });
     completeText = await LLMConnector.handleStream(response, stream, {
       uuid,
-      sources: [],
+      sources: safeSources,
     });
     metrics = stream.metrics;
   }
@@ -197,7 +251,7 @@ async function streamChatWithForEmbed(
   await EmbedChats.new({
     embedId: embed.id,
     prompt: message,
-    response: { text: completeText, type: chatMode, sources, metrics },
+    response: { text: completeText, type: chatMode, sources: safeSources, metrics },
     connection_information: response.locals.connection
       ? {
           ...response.locals.connection,
