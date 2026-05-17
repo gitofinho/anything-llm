@@ -13,3 +13,12 @@ yarn.lock
 
 # Sample data: binary fixtures kept local-only (see samples/*/README.md).
 samples/**/raw/
+
+# Local Claude Code workspace config (per-machine, not shared).
+.claude/
+
+# Generated at runtime by ContextWindowFinder; not source.
+server/__tests__/utils/agents/models/context-windows/
+
+# Local scratch page for manually exercising the embed widget.
+/test.html
