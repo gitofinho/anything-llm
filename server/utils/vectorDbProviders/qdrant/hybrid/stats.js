@@ -1,7 +1,8 @@
 // A single reserved point per Qdrant collection holds BM25 statistics.
 // id is a fixed UUID so it doesn't collide with content points
-// (AnythingLLM uses random uuidv4 for content).
-const STATS_POINT_ID = "00000000-0000-4000-8000-000000bm2500";
+// (AnythingLLM uses random uuidv4 for content). Must be a valid hex UUID —
+// Qdrant rejects non-hex ids ("bm25" is not hex); "0b2500" is the mnemonic.
+const STATS_POINT_ID = "00000000-0000-4000-8000-0000000b2500";
 
 const _locks = new Map(); // namespace -> Promise chain
 

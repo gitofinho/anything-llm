@@ -16,6 +16,7 @@
     "lint:check": "eslint .",
     "test": "jest --testPathIgnorePatterns=__tests__/integration",
     "test:integration": "jest --runInBand --passWithNoTests __tests__/integration",
+    "test:e2e": "node scripts/qdrant-hybrid-e2e.cjs",
     "swagger": "node ./swagger/init.js"
   },
   "prisma": {
